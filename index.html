@@ -1,0 +1,1170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Haunted House</title>
+    <script src="babylon.js"></script>
+    <script src="cannon.js"></script>
+    <script src="babylon.gui.min.js"></script>
+    <script src="babylon.inspector.bundle.js"></script>
+    <script src="loaders.js"></script>
+    <style>
+        html, body {
+            margin: 0;
+            overflow: hidden;
+            width: 100%;
+            height: 100%;
+            background-color: black;
+        }
+        #renderCanvas {
+            width: 100%;
+            height: 100%;
+            touch-action: none;
+            outline: none;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="renderCanvas"></canvas>
+    <script>
+        //creating the game engine and the rendering canvas
+        const canvas = document.getElementById("renderCanvas");
+        const engine = new BABYLON.Engine(canvas, true);
+        
+        //global variables (the ones we use throughout the code)
+        const PLAYER_SPAWN = new BABYLON.Vector3(841.91, -665.75, -10690.35);
+        const playerState = { Cake: false, Key: false, Sapphire: false, Heels: false, Emerald: false, Ruby: false };
+        let collectedLore = [];
+        let inventory = [];
+        let paused = false;
+        let menuMode = "pause";
+        let recordingMode = false;
+        let flight = false;
+        let sprint = false;
+        let brightMode = false;
+        let houseMemory = {
+    cupboardDisturbed: false,
+    cupboardDeaths: 0,
+    fakeHeelsSeen: 0
+};
+let storyActive = false;
+let lastStoryTime = 0;
+
+        //creating the scene (so the world)
+        const createScene = () => {
+            const scene = new BABYLON.Scene(engine);
+            scene.useRightHandedSystem = true;
+            scene.enablePhysics(new BABYLON.Vector3(0, -9.81, 0), new BABYLON.CannonJSPlugin());
+            scene.collisionsEnabled = true;
+            
+            //the fog and aesthetics to set the sdene for the environemt
+            scene.clearColor = new BABYLON.Color4(0.01, 0.01, 0.02, 1);
+            scene.ambientColor = new BABYLON.Color3(0.15, 0.15, 0.2);
+            scene.fogMode = BABYLON.Scene.FOGMODE_EXP2;
+            scene.fogDensity = 0.01;
+            scene.createDefaultSkybox(null, true, 1000, 0.2);
+            
+            //lightingg
+            const ambientLight = new BABYLON.HemisphericLight("ambient", new BABYLON.Vector3(0, 1, 0), scene);
+            ambientLight.intensity = 0.05; 
+            
+            //the lighting (that the player shows)
+            const playerTorch = new BABYLON.PointLight("torch", PLAYER_SPAWN.clone(), scene);
+            playerTorch.range = 100;
+            playerTorch.intensity = 0.5;
+            
+            //the camera aka the player
+            const cam = new BABYLON.UniversalCamera("cam", PLAYER_SPAWN.clone(), scene);
+            cam.attachControl(canvas, true);
+            cam.applyGravity = true;
+            cam.checkCollisions = true;
+            cam.ellipsoid = new BABYLON.Vector3(1, 1.5, 1);
+            cam.speed = 10;
+            cam.keysUp = [87];    //W
+            cam.keysDown = [83];  //S
+            cam.keysLeft = [65];  //A
+            cam.keysRight = [68]; //D
+
+            //game locations for the coordinate location tracker <3
+            const beatricePos = new BABYLON.Vector3(841.91, -625.75, -10590.35);
+            const cauldronPos = new BABYLON.Vector3(841.91, -665.75, -10500);
+            const floorPosForCupboard = new BABYLON.Vector3(-800, PLAYER_SPAWN.y - 1, 2500);
+            const ELEVATOR_POS = new BABYLON.Vector3(PLAYER_SPAWN.x + 10, PLAYER_SPAWN.y, PLAYER_SPAWN.z + 500);
+            const ELEVATOR_DEST = new BABYLON.Vector3(-326, floorPosForCupboard.y + 1, 4300);
+            const EMERALD_PORTAL_POS = ELEVATOR_DEST.add(new BABYLON.Vector3(0, 0, 60));
+            
+            //variables for our orbiting jewels
+            let orbitingJewels = [];
+            let orbitTarget = "player"; //you can chanfe this to cauldron, i'm not tho
+            
+            function createOrbitingJewel(color) {
+                const orb = BABYLON.MeshBuilder.CreateSphere("orb", { diameter: 1.5 }, scene);
+                const mat = new BABYLON.StandardMaterial("orbMat", scene);
+                mat.emissiveColor = color;
+                orb.material = mat;
+                orbitingJewels.push(orb);
+            }
+
+            //gui creation (it's longgg)
+            //CREATE THE SCENE PROPERLY :(
+            const guiTexture = BABYLON.GUI.AdvancedDynamicTexture.CreateFullscreenUI("UI", true, scene);
+            guiTexture.renderScale = 1;
+            guiTexture.idealWidth = 1920;
+
+            //the location tracker
+            const locationText = new BABYLON.GUI.TextBlock();
+            locationText.text = "Location: Entrance";
+            locationText.color = "white";
+            locationText.fontSize = 24;
+            locationText.textHorizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
+            locationText.textVerticalAlignment = BABYLON.GUI.Control.VERTICAL_ALIGNMENT_TOP;
+            locationText.top = "20px";
+            locationText.left = "20px";
+            guiTexture.addControl(locationText);
+            function getLocationName(pos) {
+                const locs = [
+                    { name: "Entrance", pos: PLAYER_SPAWN },
+                    { name: "Entrance Hall", pos: beatricePos },
+                    { name: "Ballroom", pos: cauldronPos },
+                    { name: "Staircase Room", pos: ELEVATOR_POS },
+                    { name: "Cupboard", pos: new BABYLON.Vector3(-300, floorPosForCupboard.y, 3300) },
+                    { name: "Bedroom", pos: new BABYLON.Vector3(-800, PLAYER_SPAWN.y, 2500) },
+                    { name: "Window", pos: EMERALD_PORTAL_POS }
+                ];
+                let closest = "Unknown";
+                let minDist = Infinity;
+                locs.forEach(l => {
+                    let d = BABYLON.Vector3.Distance(pos, l.pos);
+                    if(d < minDist) { minDist = d; closest = l.name; }
+                });
+                return closest;
+            }
+
+            //top right jewel tracker thingyyyy (UI)
+            const jewelUI = new BABYLON.GUI.StackPanel();
+            jewelUI.width = "150px";
+            jewelUI.height = "150px";
+            jewelUI.isVertical = false;
+            jewelUI.horizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT;
+            jewelUI.verticalAlignment = BABYLON.GUI.Control.VERTICAL_ALIGNMENT_TOP;
+            jewelUI.top = "20px";
+            jewelUI.left = "-20px";
+            guiTexture.addControl(jewelUI);
+
+            //the individual jewel indicators
+            function createJewelIndicator() {
+                const circle = new BABYLON.GUI.Ellipse();
+                circle.width = "40px";
+                circle.height = "40px";
+                circle.thickness = 2;
+                circle.color = "white";
+                circle.background = "black";
+                circle.alpha = 0.4;
+                return circle;
+            }
+            const sapphireUI = createJewelIndicator();
+            const emeraldUI = createJewelIndicator();
+            const rubyUI = createJewelIndicator();
+            jewelUI.addControl(sapphireUI);
+            jewelUI.addControl(emeraldUI);
+            jewelUI.addControl(rubyUI);
+
+            //update the function now! plzzz :(
+            function updateJewelUI() {
+                sapphireUI.background = playerState.Sapphire ? "blue" : "black";
+                emeraldUI.background = playerState.Emerald ? "green" : "black";
+                rubyUI.background = playerState.Ruby ? "red" : "black";
+                sapphireUI.alpha = playerState.Sapphire ? 1 : 0.4;
+                emeraldUI.alpha = playerState.Emerald ? 1 : 0.4;
+                rubyUI.alpha = playerState.Ruby ? 1 : 0.4;
+            }
+            
+            //settings for hint text
+            const hintText = new BABYLON.GUI.TextBlock();
+            hintText.color = "white";
+            hintText.fontSize = 24;
+            hintText.top = "-40%";
+            hintText.isVisible = false;
+            guiTexture.addControl(hintText);
+            
+            //the things we do in hint text
+            const showHint = (txt) => {
+                hintText.text = txt;
+                hintText.isVisible = true;
+                setTimeout(() => { hintText.isVisible = false; }, 3000);
+            };
+            
+            //the design settings for the journal
+            const journalRect = new BABYLON.GUI.Rectangle();
+            journalRect.width = "60%";
+            journalRect.height = "70%";
+            journalRect.background = "black";
+            journalRect.alpha = 0.8;
+            journalRect.isVisible = false;
+            guiTexture.addControl(journalRect);
+            
+            //the settings for the text of the journal
+            const journalText = new BABYLON.GUI.TextBlock();
+            journalText.color = "white";
+            journalRect.addControl(journalText);
+            
+            //the inventory colour and design thingy
+            const inventoryRect = new BABYLON.GUI.Rectangle();
+            inventoryRect.width = "40%";
+            inventoryRect.height = "50%";
+            inventoryRect.background = "black";//this can be changed to other colours btw
+            inventoryRect.alpha = 0.8;
+            inventoryRect.isVisible=false;
+            inventoryRect.top = "0%";
+            guiTexture.addControl(inventoryRect);
+            
+           //what is written in the inventory
+            const inventoryText = new BABYLON.GUI.TextBlock();
+            inventoryText.color = "white";
+            inventoryText.fontSize = 20;
+            inventoryRect.addControl(inventoryText);
+            
+            //the pause menu
+            const pauseBG = new BABYLON.GUI.Rectangle();
+            pauseBG.width = "100%";
+            pauseBG.height = "100%";
+            pauseBG.background = "#1c011b"; //it's kinda aesthetic idk why
+            pauseBG.alpha = 0.8;
+            pauseBG.horizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_CENTER;
+            pauseBG.verticalAlignment = BABYLON.GUI.Control.VERTICAL_ALIGNMENT_CENTER;
+            pauseBG.isVisible = false;
+            pauseBG.isPointerBlocker = true;
+            guiTexture.addControl(pauseBG);
+            const pauseTitle = new BABYLON.GUI.TextBlock();
+            pauseTitle.text = "PAUSED";
+            pauseTitle.color = "red";
+            pauseTitle.fontSize = 48;
+            pauseTitle.top = "-200px";
+            pauseBG.addControl(pauseTitle);
+            
+            //make the buttons
+            function addButton(text, y, onClick) {
+                const btn = BABYLON.GUI.Button.CreateSimpleButton(text, text);
+                btn.width = "200px";
+                btn.height = "50px";
+                btn.color = "white";
+                btn.background = "gray";
+                btn.top = y;
+                btn.verticalAlignment = BABYLON.GUI.Control.VERTICAL_ALIGNMENT_CENTER;
+                btn.onPointerUpObservable.add(onClick);
+                pauseBG.addControl(btn);
+            }
+            addButton("Resume", "-120px", resumeGame);
+            addButton("Save Slot 1", "-60px", () => saveSlot(1));
+            addButton("Save Slot 2", "0px", () => saveSlot(2));
+            addButton("Save Slot 3", "60px", () => saveSlot(3));
+            addButton("Load Slot 1", "140px", () => loadSlot(1));
+            addButton("Load Slot 2", "200px", () => loadSlot(2));
+            addButton("Load Slot 3", "260px", () => loadSlot(3));
+            
+            function showPauseMenu(mode = "pause") {
+                menuMode = mode;
+                pauseTitle.text = mode === "pause" ? "PAUSED" : "LOAD GAME";
+                pauseBG.isVisible = true;
+                cam.detachControl();
+                document.exitPointerLock();
+            }
+            function hidePauseMenu() {
+                pauseBG.isVisible = false;
+            }
+            function resumeGame() {
+                paused = false;
+                hidePauseMenu();
+                cam.attachControl(canvas, true);
+                canvas.focus();
+                canvas.requestPointerLock();
+            }
+            function saveSlot(slot) {
+                const data = {
+                    position: cam.position.clone(),
+                    playerState: JSON.parse(JSON.stringify(playerState)),
+                    inventory: [...inventory],
+                    collectedLore: [...collectedLore],
+                    houseMemory: JSON.parse(JSON.stringify(houseMemory))
+                };
+                localStorage.setItem("slot" + slot, JSON.stringify(data));
+                showHint("Saved Slot " + slot);
+            }
+            function loadSlot(slot) {
+                const data = localStorage.getItem("slot" + slot);
+                if (!data) {
+                    showHint("Empty Slot " + slot);
+                    return;
+                }
+                const s = JSON.parse(data);
+
+                
+                playerState.Cake = s.playerState.Cake;
+                playerState.Key = s.playerState.Key;
+                playerState.Sapphire = s.playerState.Sapphire;
+                playerState.Heels = s.playerState.Heels;
+                playerState.Emerald = s.playerState.Emerald || false;
+                playerState.Ruby = s.playerState.Ruby || false;
+                inventory = s.inventory || [];
+                collectedLore = s.collectedLore || [];
+                cam.position = new BABYLON.Vector3(s.position.x, s.position.y, s.position.z);
+                houseMemory = s.houseMemory || {
+    cupboardDisturbed: false,
+    cupboardDeaths: 0,
+    fakeHeelsSeen: 0
+};
+                
+                //rebuild our orbiting jewels on reloadddd
+                orbitingJewels.forEach(o => o.dispose());
+                orbitingJewels = [];
+                if (playerState.Sapphire) createOrbitingJewel(new BABYLON.Color3(0, 0, 1));
+                if (playerState.Emerald) createOrbitingJewel(new BABYLON.Color3(0, 1, 0));
+                if (playerState.Ruby) createOrbitingJewel(new BABYLON.Color3(1, 0, 0));
+                
+                updateJewelUI();
+                showHint("Loaded Slot " + slot);
+                resumeGame(); //resume the game when it's loaded
+            }
+
+            //a function to properly remove the items from the inventory
+            function removeItemFromInventory(itemName) {
+                playerState[itemName] = false;
+                const idx = inventory.indexOf(itemName);
+                if (idx > -1) {
+                    inventory.splice(idx, 1);
+                }
+                updateInventoryUI();
+                updateJewelUI(); //update the UI when it is removed from the inventory
+            }
+
+            //Handling key inputs (yk like pressing p)
+            canvas.tabIndex = 1;
+            canvas.addEventListener("click", () => {
+                if (!paused) {
+                    canvas.focus();
+                    canvas.requestPointerLock();
+                }
+            });
+            document.addEventListener("keydown", e => {
+                const key = e.key.toLowerCase();
+                //the pause menu part (press P)
+                if (key === "p") {
+                    if (!paused) {
+                        paused = true;
+                        showPauseMenu("pause");
+                    } else {
+                        resumeGame();
+                    }
+                }
+                //saving and loading mode (similar to pause menu) - Press G
+                if (key === "g" && !paused) {
+                    paused = true;
+                    showPauseMenu("load");
+                }
+                //if paused, don't allow other inputs until resumed
+                if (paused) return;
+                
+                //some useful keys, some playtesting/creative mode keys
+                //sprinting logic
+                if (e.key === "Shift") sprint = true;
+                //flying logic
+                if (key === "f") {
+                    flight = !flight;
+                    cam.applyGravity = !flight;
+                    showHint(flight ? "Flight ON" : "Flight OFF");
+                }
+                //bright mode logic
+                if (key === "l") {
+                    brightMode = !brightMode;
+                    showHint(brightMode ? "Bright ON" : "Bright OFF");
+                }
+                //some flying logic
+                if (flight) {
+                    if (e.code === "Space") cam.cameraDirection.y+= 2;
+                    if (e.key === "Control") cam.cameraDirection.y-= 2;
+                }
+                
+                //some game triggers
+                //o gives you the heels automatically (O = OP (overpowered mode))
+                if (key === "o") {
+                    recordingMode = true;
+                    if (!playerState.Heels) {
+                        playerState.Heels = true;
+                        inventory.push("Heels");
+                        showHint("Beatrice says 'Those are my heels. Return them to me...'");
+                        //if you have the heels, watch what happens
+                        scene.meshes.forEach(mesh => {
+                            if (mesh && mesh.name && mesh.name.startsWith("theheels.obj")) {
+                                mesh.dispose();
+                            }
+                        });
+                    }
+                }
+                //UI keys and help
+                //help key
+                if (key === "h") showHint("Click->Lock | WASD move | Shift sprint | Space jump | Ctrl descend | J journal | K inventory | P Pause Game | G Save and load game |");
+                //journal entries (by Beatrice and the world)
+                if (key === "j") {
+                    journalRect.isVisible = !journalRect.isVisible;
+                    journalText.text = collectedLore.join("\n\n");
+                }
+                //the inspector
+                if (key === "i") {
+                    if (!scene.debugLayer.isVisible()) scene.debugLayer.show({ embedMode: true });
+                    else scene.debugLayer.hide();
+                }
+                //the inventory
+                if (key === "k") {
+                    inventoryRect.isVisible = !inventoryRect.isVisible;
+                    updateInventoryUI();
+                }
+                //inventory dropping logic (it burns the items - don't ask why it's useless to drop but still). According to the lore of the house, Beatrice's mother also exists here. Following you. Finding her daughter...
+                if (inventoryRect.isVisible && /^[1-9]$/.test(e.key)) {
+                    const idx = parseInt(e.key) - 1;
+                    if (inventory[idx]) {
+                        const dropped = inventory.splice(idx, 1)[0];
+                        playerState[dropped] = false;
+                        showHint(dropped + " dropped!");
+                        updateInventoryUI();
+                        updateJewelUI();
+                    }
+                }
+            });
+            //logic for sprinting (by pressing the shift key)
+            document.addEventListener("keyup", e => {
+                if (e.key==="Shift") sprint = false;
+            });
+            function updateInventoryUI() {
+                if (inventoryRect.isVisible) {
+                    let text = "Inventory:\n";
+                    inventory.forEach((item, i) => { text += (i + 1) + ". " + item + "\n"; });
+                    text += "\nPress number to drop item.";
+                    inventoryText.text = text;
+                }
+            }
+            
+            //loading the world with the "thehouse.obj" model (it's the haunted house if you didn't get that)
+            BABYLON.SceneLoader.ImportMesh("", "./", "thehouse.obj", scene, meshes => {
+                meshes.forEach(mesh => {
+                    mesh.usePivotMatrixToTransformNodes = true;
+                    mesh.setPivotMatrix(BABYLON.Matrix.Translation(
+                        -mesh.getBoundingInfo().boundingBox.center.x,
+                        -mesh.getBoundingInfo().boundingBox.center.y,
+                        -mesh.getBoundingInfo().boundingBox.center.z
+                    ));
+                    mesh.scaling = new BABYLON.Vector3(10, 10, 10);
+                    mesh.checkCollisions = true;
+                });
+            });
+            
+            //creating walls (pretty self explanatory)
+            const wall = BABYLON.MeshBuilder.CreateBox("wall", { width: 2000, height: 1000, depth: 50 }, scene);
+            wall.position = PLAYER_SPAWN.add(new BABYLON.Vector3(0, 0, -200));
+            wall.isVisible = false;
+            wall.checkCollisions = true;
+            
+            //creating a floor of glow (for the cupboard and heels)
+            const floor = BABYLON.MeshBuilder.CreateGround("heelsFloor", { width: 18000, height: 8000 }, scene);
+            floor.position = floorPosForCupboard;
+            floor.checkCollisions = true;
+            const floorMat = new BABYLON.StandardMaterial("floorMat", scene);
+            floorMat.emissiveColor = new BABYLON.Color3(0.2, 0, 0.4);
+            floorMat.alpha = 0.35;
+            floorMat.backFaceCulling = false;
+            floor.material = floorMat;
+            
+            //creating particles here, used in heels and the portals (ocassionally)
+            const ps = new BABYLON.ParticleSystem("magic", 2000, scene);
+            const psEmitter = new BABYLON.MeshBuilder.CreateBox("psEmitter", { width: 1, height: 1, depth: 1 }, scene);
+            psEmitter.position = floor.position.add(new BABYLON.Vector3(0, 1, 0));
+            psEmitter.isVisible = false;
+            ps.emitter = psEmitter;
+            ps.minEmitBox = new BABYLON.Vector3(-3000, 0, -1000);
+            ps.maxEmitBox = new BABYLON.Vector3(3000, 0, 1000);
+            ps.color1 = new BABYLON.Color4(0.6, 0, 1, 1);
+            ps.color2 = new BABYLON.Color4(0.3, 0, 1, 1);
+            ps.minSize = 0.2;
+            ps.maxSize = 0.6;
+            ps.minLifeTime = 1;
+            ps.maxLifeTime = 3;
+            ps.emitRate = 500;
+            ps.blendMode = BABYLON.ParticleSystem.BLENDMODE_ADD;
+            ps.gravity = new BABYLON.Vector3(0, 1, 0);
+            ps.start();
+            
+            //logic for creating a portal, used for travelling because they are easier to code than staircases
+            const createPortal = (pos, target, color) => {
+                const portal = BABYLON.MeshBuilder.CreateSphere("portal", { diameter: 2 }, scene);
+                portal.position = pos.clone();
+                const mat = new BABYLON.StandardMaterial("portalMat", scene);
+                mat.emissiveColor = color || new BABYLON.Color3(0, 0.8, 1);
+                portal.material = mat;
+                scene.onBeforeRenderObservable.add(() => {
+                    if (paused) return;
+                    if (BABYLON.Vector3.Distance(cam.position, portal.position) < 5) {
+                        cam.position = target.clone();
+                    }
+                });
+            }
+            
+            //portals. most of these are useless, but there is the elevator portal. this needs to be activated by the cake.
+            createPortal(new BABYLON.Vector3(-260, -678, 770), new BABYLON.Vector3(-260, -678, 1111));
+            createPortal(new BABYLON.Vector3(-309, -678, 3831), new BABYLON.Vector3(-326, -678, 4300));
+            const elevator = BABYLON.MeshBuilder.CreateSphere("elevator", { diameter: 5 }, scene);
+            elevator.position.copyFrom(ELEVATOR_POS);
+            const emat = new BABYLON.StandardMaterial("eMat", scene);
+            emat.emissiveColor = new BABYLON.Color3(1, 0, 0);
+            emat.alpha = 0.8;
+            elevator.material = emat;
+            createPortal(
+    ELEVATOR_DEST.add(new BABYLON.Vector3(0, 0, 40)), // a bit further away
+    PLAYER_SPAWN.clone(),
+    new BABYLON.Color3(0.3, 0, 0.5) // dark, less obvious purple than expected
+);
+            //the logic for spawning an item, here we're taking from .obj files (Added customSetup for blue sapphire override)
+            const spawnItem = (file, pos, flag, dependency = null, scale = 1, rotationY = 0, color1 = null, color2 = null, customSetup = null) => {
+                BABYLON.SceneLoader.ImportMesh("", "./", file, scene, meshes => {
+                    const item = meshes[0];
+                    item.position = pos.clone();
+                    item.scaling = new BABYLON.Vector3(scale, scale, scale);
+                    item.rotation.y = rotationY;
+                    item.checkCollisions = true;
+
+                    if (customSetup) customSetup(meshes); 
+
+                    if (color1 && color2) {
+                        const psItem = new BABYLON.ParticleSystem(file + "_particles", 1000, scene);
+                        psItem.emitter = item;
+                        psItem.color1 = color1;
+                        psItem.color2 = color2;
+                        psItem.emitRate = 50;
+                        psItem.start();
+                    }
+                    scene.onBeforeRenderObservable.add(() => {
+                        if (paused || !item || item.isDisposed()) return;
+                        const dist = BABYLON.Vector3.Distance(cam.position, item.position);
+                        if (dependency && !playerState[dependency]) {
+                            if (dist < 5 && Math.random() < 0.01) showHint(`You need ${dependency} first!`);
+                        } else {
+                            if (!playerState[flag] && dist < 4) {
+                                playerState[flag] = true;
+                                inventory.push(flag);
+                                item.dispose();
+                                showHint(flag + " collected!");
+                                
+                                //the logic for orbiting jewels
+                                if (flag === "Sapphire") createOrbitingJewel(new BABYLON.Color3(0,0,1));
+                                if (flag === "Emerald") createOrbitingJewel(new BABYLON.Color3(0,1,0));
+                                if (flag === "Ruby") createOrbitingJewel(new BABYLON.Color3(1,0,0));
+                                
+                                updateInventoryUI();
+                                updateJewelUI(); //update the UI after collecting a jewel!
+                            }
+                        }
+                    });
+                });
+            }
+            
+            //items you can pick up at the start -- Sapphire forced to be blue via customSetup
+            spawnItem("sapphire.obj", PLAYER_SPAWN.clone().add(new BABYLON.Vector3(80, 0, 120)), "Sapphire", null, 3, Math.PI / 2, new BABYLON.Color4(0.6, 0, 1, 1), new BABYLON.Color4(0.3, 0, 1, 1), (meshes) => {
+                const blueMat = new BABYLON.StandardMaterial("sapphireBlueMat", scene);
+                blueMat.emissiveColor = new BABYLON.Color3(0, 0, 1);
+                blueMat.diffuseColor = new BABYLON.Color3(0, 0, 1);
+                meshes.forEach(m => { if (m) m.material = blueMat; });
+            });
+            spawnItem("key.obj", PLAYER_SPAWN.clone().add(new BABYLON.Vector3(-100, 0, 150)), "Key", "Sapphire", 0.75, 0, new BABYLON.Color4(0, 0.5, 1, 1), new BABYLON.Color4(0, 0.3, 1, 1));
+            spawnItem("cake.obj", PLAYER_SPAWN.clone().add(new BABYLON.Vector3(50, 0, 30)), "Cake", "Key", 3, -Math.PI / 2, new BABYLON.Color4(1, 0.6, 0, 1), new BABYLON.Color4(1, 0.3, 0, 1));
+            //emerald, held in an orb, and the exchange
+            BABYLON.SceneLoader.ImportMesh("", "./", "emerald.obj", scene, meshes => {
+                const emeraldMesh = meshes[0];
+                emeraldMesh.position = EMERALD_PORTAL_POS.clone();
+                emeraldMesh.scaling = new BABYLON.Vector3(3, 3, 3); //can be adjusted
+                
+                //the glowing shell around the emerald (or orb idk what to call it)
+                const emPortal = BABYLON.MeshBuilder.CreateSphere("emPortal", { diameter: 4 }, scene);
+                emPortal.position = EMERALD_PORTAL_POS.clone();
+                const epMat = new BABYLON.StandardMaterial("emPortalMat", scene);
+                epMat.emissiveColor = new BABYLON.Color3(0, 1, 0);
+                epMat.alpha = 0.4;
+                emPortal.material = epMat;
+
+                const psG = new BABYLON.ParticleSystem("greenPs", 1000, scene);
+                psG.emitter = emPortal;
+                psG.color1 = new BABYLON.Color4(0, 1, 0, 1);
+                psG.color2 = new BABYLON.Color4(0.2, 0.8, 0.2, 1);
+                psG.emitRate = 100;
+                psG.start();
+
+                scene.onBeforeRenderObservable.add(() => {
+                    if (paused || playerState.Emerald) return;
+                    const dist = BABYLON.Vector3.Distance(cam.position, emPortal.position);
+                    if (dist < 5) {
+                        if (playerState.Key && playerState.Cake) {
+                            removeItemFromInventory("Key");
+                            removeItemFromInventory("Cake");
+                            playerState.Emerald = true;
+                            inventory.push("Emerald");
+                            showHint("The portal consumed Key & Cake! You obtained the Emerald. The light is restored!");
+                            
+                            createOrbitingJewel(new BABYLON.Color3(0,1,0));
+                            updateInventoryUI();
+                            updateJewelUI();
+                            
+                            //remove the portal and the emerald after walking through
+                            emeraldMesh.dispose();
+                            emPortal.dispose();
+                            psG.stop();
+                        } else if (Math.random() < 0.02) {
+                            showHint("This glowing green portal demands the Key and Cake as tribute...");
+                        }
+                    }
+                });
+            });
+
+            //the cupboard items (murderous) and fake heels - annoyance
+const cupboardItems = ["shellbox.obj", "perfume.obj", "chair.obj", "cushion.obj", "cushionwithbuttons.obj", "chest.obj", "theheels.obj"];
+
+cupboardItems.forEach(file => {
+    BABYLON.SceneLoader.ImportMesh("", "./", file, scene, meshes => {
+        const master = meshes[0];
+
+        master.setEnabled(false);
+
+        let baseScale = file === "theheels.obj" ? 50 : 3;
+        master.scaling = new BABYLON.Vector3(baseScale, baseScale, baseScale);
+
+        let realHeelIndex = file === "theheels.obj" ? Math.floor(Math.random() * 10) : -1;
+
+        for (let i = 0; i < 10; i++) {
+            const inst = master.createInstance(file + "_inst_" + i);
+
+            let heightOffset = (file === "theheels.obj") ? 2.5 : 5;
+
+            inst.position = new BABYLON.Vector3(
+                -913 + Math.random() * 1220,
+                floor.position.y + heightOffset,
+                2114 + Math.random() * 2400
+            );
+
+            inst.setEnabled(true);
+            inst.checkCollisions = true;
+
+            inst.physicsImpostor =
+                new BABYLON.PhysicsImpostor(
+                    inst,
+                    BABYLON.PhysicsImpostor.BoxImpostor,
+                    { mass: 0, restitution: 0.1 },
+                    scene
+                );
+
+            //the logic for the heels
+            if (file === "theheels.obj") {
+                scene.onBeforeRenderObservable.add(() => {
+                    if (paused || inst.isDisposed()) return;
+
+                    const dist = BABYLON.Vector3.Distance(cam.position, inst.position);
+
+                    if (!playerState.Heels && dist < 4 && (i === realHeelIndex || recordingMode)) {
+                        playerState.Heels = true;
+                        inventory.push("Heels");
+                        inst.dispose();
+
+                        updateInventoryUI();
+                        showHint("Beatrice says, 'Those are my heels. Return them to me, and I will help you.'");
+                    }
+                });
+            }
+
+            //the other items in the closet and what they remember
+            else {
+                scene.onBeforeRenderObservable.add(() => {
+                    if (paused) return;
+
+                    if (BABYLON.Vector3.Distance(cam.position, inst.position) < 3) {
+                        if (!houseMemory.cupboardDisturbed) {
+                            houseMemory.cupboardDisturbed = true;
+                            houseMemory.fakeHeelsSeen++;
+
+                            showHint("These feel... wrong. The house remembers.");
+
+                            engine.stopRenderLoop();
+
+                            setTimeout(() => location.reload(), 1000);
+                        }
+                    }
+                });
+            }
+        }
+    });
+});
+
+//beatrice, who she is and the ruby exchange
+const storyEntries = [
+    "Beatrice once wandered these halls alone...",
+    "The whispers grow louder as you ascend the stairs...",
+    "Her eyes watched from the shadows, waiting...",
+    "I want to go. Please, leave me",
+    "No, don't hurt me.",
+    "I'm scared...",
+    "Footsteps echo behind you. You stop. They don't.",
+    "The doors remember every hand that touched them.",
+    "Something here knows your name.",
+    "You were not the first to try.",
+    "You will not be the last.",
+    "She tried to leave. The house disagreed.",
+    "The walls breathe when you aren't looking.",
+    "A laugh echoes. It isn't yours.",
+    "You feel lighter. Something is missing.",
+    "The air tightens when you turn around.",
+    "You swear the hallway just changed.",
+    "It was shorter before.",
+    "Beatrice hums a melody you've never heard.",
+    "You almost remember where you've seen her before.",
+    "She doesn't blink.",
+    "She never did.",
+    "Don't trust the quiet rooms.",
+    "They are never empty.",
+    "The floor creaks in patterns. Almost like language.",
+    "You are being guided.",
+    "But not by who you think.",
+    "The lights flicker in response to your thoughts.",
+    "Stop thinking about leaving.",
+    "It doesn't like that.",
+    "You left something behind.",
+    "Or something took it.",
+    "Check your pockets.",
+    "Count your steps.",
+    "You're losing track again.",
+    "The house rearranges itself when bored.",
+    "It is bored often.",
+    "Beatrice knows the way.",
+    "But she won't tell you everything.",
+    "She can't.",
+    "There was another before you.",
+    "They got further.",
+    "Not far enough.",
+    "Their voice still lingers here.",
+    "Sometimes it sounds like yours.",
+    "The mirrors don't reflect correctly.",
+    "Look again.",
+    "No—don't.",
+    "Too late.",
+    "You hear breathing.",
+    "It matches yours.",
+    "It shouldn't.",
+    "The jewels feel warm.",
+    "Like they've been held before.",
+    "Recently.",
+    "Something followed you through the last room.",
+    "It didn't leave.",
+    "It won't.",
+    "Beatrice whispers: 'I'm sorry.'",
+    "She says it often.",
+    "More than she should.",
+    "You are closer now.",
+    "It knows.",
+    "It always knows.",
+    "The house doesn't want you to win.",
+    "But it wants you to try.",
+    "You feel watched.",
+    "You are watched.",
+    "There is no outside.",
+    "There never was.",
+    "The exit remembers you.",
+    "Do you remember it?",
+    "Every step forward costs something.",
+    "You just haven't noticed yet.",
+    "Beatrice pauses.",
+    "She almost tells you something important.",
+    "Almost.",
+    "The silence is louder than the whispers now.",
+    "That’s worse.",
+    "You're not alone in your inventory.",
+    "Something else is keeping count.",
+    "The house learns from you.",
+    "Be careful what you teach it.",
+    "You feel like you're being tested.",
+    "You are.",
+    "You are failing.",
+    "Or maybe…",
+    "This is exactly what it wanted."
+];
+const rareStoryEntries=[
+    "You weren't supposed to see this.",
+    "The house noticed you noticing it.",
+    "Something changed this time.",
+    "This line shouldn't have appeared.",
+    "You're getting closer than the others.",
+];
+const ultraRareEntries =[
+    "You broke something.",
+    "It wasn't meant to go this far.",
+    "The pattern is different now.",
+    "Why are you still here?",
+];
+const insaneEntries = [
+    "You are not playing the game anymore.",
+    "This is no longer scripted.",
+    "Something is watching through you.",
+];
+const lotteryEntries = [
+    "I literally don't know why you didn't do the lottery.",
+    "Why did you come here?",
+    "You could have won it.",
+    "Do you understand how unlikely this is?",
+    "This was not meant for you.",
+    "Out of everything that could have happened...",
+    "you got this.",
+    "You were chosen.",
+    "And that is not a good thing."
+];
+
+BABYLON.SceneLoader.ImportMesh("", "./", "beatrice.obj", scene, meshes => {
+    const beaRoot = new BABYLON.TransformNode("beaRoot", scene);
+
+    meshes.forEach(m => {
+        m.parent = beaRoot;
+        m.scaling = new BABYLON.Vector3(100, 100, 100);
+    });
+
+    beaRoot.position = beatricePos.clone();
+
+    let hasWhispered = false;
+    let hasGivenRuby = false;
+
+    scene.onBeforeRenderObservable.add(() => {
+        if (paused) return;
+
+        const dir = cam.position.subtract(beaRoot.position);
+        beaRoot.rotation.y = Math.atan2(dir.x, dir.z);
+
+        const dist = BABYLON.Vector3.Distance(cam.position, beaRoot.position);
+
+        //what she says when she first encounters you (dependent on whether you touched the cupboard items or not)
+        if (dist < 50 && !hasWhispered) {
+            hasWhispered = true;
+            if (houseMemory.cupboardDisturbed) {
+    showHint("Beatrice whispers: ...you touched them, didn't you?");
+} else {
+    showHint("Beatrice whispers: 'Please dont get lost. Let me guide you. Open your journal.'");
+}
+            collectedLore.push(`I remember a glow… blue as the quiet sea,
+It hummed in the dark before I lost myself.
+Find it, and perhaps you’ll see what I could not.
+
+A door will not open for empty hands.
+Something small… something sweet…
+Together, they wake the path that rises.
+
+Do not trust stillness where it should not be.
+Some things wait only to take, not to give.
+Choose carefully what you reach for…
+
+I left something behind. Or perhaps… it waits for me still.
+Many copies, but only one remembers my steps.
+
+Should you return, follow the violet tear—
+it bends back to me.
+
+Bring me what was mine,
+and I will give you what I could never keep.
+
+Three lights must rest where silence stirs.
+
+And please…
+don’t forget me.`);
+        }
+
+        //ruby exchange with beatrice
+        if (dist < 50 && !hasGivenRuby && inventory.includes("Heels")) {
+            hasGivenRuby = true;
+            showHint("Beatrice says: 'Thank you for returning my heels... take this Ruby.'");
+BABYLON.SceneLoader.ImportMesh("", "./", "ruby.obj", scene, meshes => {
+    const ruby = meshes[0];
+    const startPos = beaRoot.position.add(new BABYLON.Vector3(0, 5, 0));
+    const sapphirePos = PLAYER_SPAWN.clone().add(
+        new BABYLON.Vector3(80, 0, 120)
+    );
+    ruby.position = startPos.clone();
+    ruby.scaling = new BABYLON.Vector3(3, 3, 3);
+    const mat = new BABYLON.StandardMaterial("rubyMat", scene);
+    mat.emissiveColor = new BABYLON.Color3(1, 0, 0);
+    ruby.material = mat;
+    let t = 0;
+    const duration = 120;
+    const anim = scene.onBeforeRenderObservable.add(() => {
+        if (paused) return;
+        t++;
+        const alpha = Math.min(t / duration, 1);
+        ruby.position = BABYLON.Vector3.Lerp(startPos, sapphirePos, alpha);
+        ruby.position.y += Math.sin(alpha * Math.PI) * 8;
+        if (alpha >= 1) {
+    scene.onBeforeRenderObservable.remove(anim);
+    //now make the ruby collectible it was solid before :(( 
+    scene.onBeforeRenderObservable.add(() => {
+        if (paused || ruby.isDisposed()) return;
+        const dist = BABYLON.Vector3.Distance(cam.position, ruby.position);
+        if (dist < 4 && !playerState.Ruby) {
+            playerState.Ruby = true;
+            inventory.push("Ruby");
+            showHint("Ruby collected!");
+            createOrbitingJewel(new BABYLON.Color3(1, 0, 0));
+            ruby.dispose();
+            updateInventoryUI();
+            updateJewelUI();
+        }
+    });
+}
+    });
+});
+            //remove the heels from the inventory after taking the ruby
+            setTimeout(() => {
+                removeItemFromInventory("Heels");
+            }, 0);
+        }
+    });
+});
+            //the cauldron and the portal
+            let finalPortal = null;
+            let endingTriggered = false;
+            BABYLON.SceneLoader.ImportMesh("", "./", "cauldron.obj", scene, meshes => {
+                const cauldron = meshes[0];
+                cauldron.position = cauldronPos.clone(); 
+                cauldron.scaling = new BABYLON.Vector3(5, 5, 5); // Adjust scale as necessary
+                cauldron.checkCollisions = true;
+                let endgamePortalCreated = false;
+
+                scene.onBeforeRenderObservable.add(() => {
+                    if (paused) return;
+                    const dist = BABYLON.Vector3.Distance(cam.position, cauldron.position);
+                    
+                    if (dist < 15 && !endgamePortalCreated) {
+                        if (playerState.Sapphire && playerState.Emerald && playerState.Ruby) {
+                            endgamePortalCreated = true;
+                            
+                            //remove the jewels from the inventory
+                            removeItemFromInventory("Sapphire");
+                            removeItemFromInventory("Emerald");
+                            removeItemFromInventory("Ruby");
+                            updateJewelUI();
+
+                            //rotate the jewels around the cauldron
+                            orbitTarget = "cauldron";
+                            showHint("The Cauldron consumes the jewels and rips open a portal!");
+                            // Create a glowing purple portal
+                            finalPortal = BABYLON.MeshBuilder.CreateSphere("finalPortal", { diameter: 20 }, scene);
+                            finalPortal.position = cauldron.position.add(new BABYLON.Vector3(0, 10, 30));
+                            const fpMat = new BABYLON.StandardMaterial("fpMat", scene);
+                            fpMat.emissiveColor = new BABYLON.Color3(0.6, 0, 1); // Purple
+                            fpMat.alpha = 0.8;
+                            finalPortal.material = fpMat;
+                            //massive purple particles
+                            const psFinal = new BABYLON.ParticleSystem("finalParticles", 2000, scene);
+                            psFinal.emitter = finalPortal;
+                            psFinal.color1 = new BABYLON.Color4(0.8, 0, 1, 1);
+                            psFinal.color2 = new BABYLON.Color4(0.4, 0, 1, 1);
+                            psFinal.minSize = 1.5;
+                            psFinal.maxSize = 5.0;
+                            psFinal.emitRate = 300;
+                            psFinal.start();
+                        } else if (dist < 10 && Math.random() < 0.01) {
+                            showHint("The cauldron remains dormant. It demands three jewels: a sapphire, an emerald and a ruby.");
+                        }
+                    }
+                });
+            });
+            //rendering updates
+            scene.onBeforeRenderObservable.add(() => {
+                if (paused) return; // Freeze game logic
+                //orbiting jewels and location tracking updating
+                locationText.text = "Location: " + getLocationName(cam.position); 
+                orbitingJewels.forEach((orb, i) => {
+                    // Spread the angle evenly depending on how many jewels are currently orbiting
+                    const offset = i * ((Math.PI * 2) / Math.max(1, orbitingJewels.length));
+                    if (orbitTarget === "player") {
+                        const angle = Date.now() * 0.002 + offset;
+                        const radius = 5;
+                        orb.position.x = cam.position.x + Math.cos(angle) * radius;
+                        orb.position.z = cam.position.z + Math.sin(angle) * radius;
+                        orb.position.y = cam.position.y + 2 + Math.sin(angle * 2);
+                    } else if (orbitTarget === "cauldron") {
+                        const angle = Date.now() * 0.002 + offset;
+                        orb.position.x = cauldronPos.x + Math.cos(angle) * 6;
+                        orb.position.z = cauldronPos.z + Math.sin(angle) * 6;
+                        orb.position.y = cauldronPos.y + 5;
+                    }
+                });
+                //Final flash effect thingy
+                if (finalPortal && BABYLON.Vector3.Distance(cam.position, finalPortal.position) < 15 && !endingTriggered) {
+    endingTriggered = true;
+    cam.detachControl();
+
+    const flash = new BABYLON.GUI.Rectangle();
+    flash.width = "100%";
+    flash.height = "100%";
+    flash.background = "white";
+    flash.alpha = 0;
+    guiTexture.addControl(flash);
+
+    let t = 0;
+    const fade = scene.onBeforeRenderObservable.add(() => {
+        t += 0.05;
+        flash.alpha = t;
+        if (t >= 1) {
+            scene.onBeforeRenderObservable.remove(fade);
+        }
+    });
+    setTimeout(() => {
+    //hide theflash
+    flash.isVisible = false;
+    //create and show the image
+    const completeImg = new BABYLON.GUI.Image(
+        "completeImg",
+        "./abcdefg.png"
+    );
+    completeImg.width = "100%";
+    completeImg.height = "100%";
+    guiTexture.addControl(completeImg); 
+    const txt = new BABYLON.GUI.TextBlock();
+    txt.text = "Game Complete!";
+    txt.color = "purple";
+    txt.fontSize = 48;
+    txt.top = "-40%";
+    guiTexture.addControl(txt);
+    //wait before we stop the render loop
+    setTimeout(() => {
+        engine.stopRenderLoop();
+    }, 100); //a tiny delay -> can render
+
+}, 2000);
+}
+                //torch flickering and lighting logiccc
+                playerTorch.position.copyFrom(cam.position);     
+                //swap lighting based off the emerald
+                if (playerState.Emerald) {
+                    ambientLight.intensity = 0.3; //brighter
+                    playerTorch.intensity = brightMode ? 10 : 2 + Math.sin(Date.now() * 0.02) * 0.5 + Math.random() * 0.5;
+                } else {
+                    ambientLight.intensity = 0.05; //stayinggg dark
+                    playerTorch.intensity = brightMode ? 10 : 0.8 + Math.sin(Date.now() * 0.02) * 0.2; // Dimmer torch
+                }
+                //pulsing elevator
+                emat.emissiveColor.r = 0.5 + 0.5 * Math.sin(Date.now() * 0.005);
+                if (BABYLON.Vector3.Distance(cam.position, ELEVATOR_POS) < 5) {
+                    if (playerState.Cake) {
+                        cam.position = ELEVATOR_DEST.clone();
+                        showHint("You ride the elevator!");
+                    } else {
+                        showHint("You need the cake to use this elevator!");
+                    }
+                }
+                //the random lore things
+    const roll = Math.random();
+    if (roll < 0.00000001) {
+        //lottery tier 💀 (if you got any of these that is the chance of winning a lottery)
+        line = lotteryEntries[Math.floor(Math.random() * lotteryEntries.length)];
+    } 
+    else if (roll < 0.000001) {
+        //insanely rare
+        line = insaneEntries[Math.floor(Math.random() * insaneEntries.length)];
+    } 
+    else if (roll < 0.00001) {
+        //ultra rareee
+        line = ultraRareEntries[Math.floor(Math.random() * ultraRareEntries.length)];
+    } 
+    else if (roll < 0.0001) {
+        // ✨rare✨
+        line = rareStoryEntries[Math.floor(Math.random() * rareStoryEntries.length)];
+    } 
+    else {
+        //common ones
+        line = storyEntries[Math.floor(Math.random() * storyEntries.length)];
+    }
+if (Date.now() - lastStoryTime < 20000) return;
+lastStoryTime = Date.now();
+    showStoryText(line);
+    collectedLore.push(line);
+});
+function showStoryText(text) {
+    if (storyActive) return; //prevents stacking from happening
+    storyActive = true;
+    const rect = new BABYLON.GUI.Rectangle();
+    rect.width = "50%";
+    rect.height = "20%";
+    rect.background = "black";
+    rect.alpha = 0.7;
+    guiTexture.addControl(rect);
+    const txt = new BABYLON.GUI.TextBlock();
+    txt.color = "white";
+    txt.fontSize = 24;
+    txt.textWrapping = true;
+    rect.addControl(txt);
+    let i = 0;
+    let current = "";
+    let deleting = false;
+    let workingText = text;
+    const typing = scene.onBeforeRenderObservable.add(() => {
+        if (paused) return;
+        if (!deleting) {
+            if (i < workingText.length) {
+                current += workingText[i];
+                txt.text = current;
+                i++;
+            } else {
+                if (Math.random() < 0.3) {
+                    deleting = true;
+                } else {
+                    scene.onBeforeRenderObservable.remove(typing);
+storyActive = false;         
+                }
+            }
+        } else {
+            if (current.length > 0) {
+                current = current.slice(0, -1);
+                txt.text = current;
+            } else {
+                workingText = corruptText(workingText);
+                deleting = false;
+                i = 0;
+            }
+        }
+    });
+    setTimeout(() => {
+    scene.onBeforeRenderObservable.remove(typing);
+    guiTexture.removeControl(rect);
+    storyActive = false;
+}, 6000);
+function corruptText(original) {
+    const words = original.split(" ");
+    if (words.length < 2) return original;
+    //pick a random word to mess up, so the message can be useless
+    const index = Math.floor(Math.random() * words.length);
+    const spookyWords = [
+        "leave", "stay", "run", "help", "no", "don't", "behind you",
+        "watching", "here", "forever", "again", "stop"
+    ];
+    words[index] = spookyWords[Math.floor(Math.random() * spookyWords.length)];
+    return words.join(" ");
+}
+                //adjusting speed =)
+                if (flight) {
+                    cam.speed = 50;
+                } else {
+                    const base = playerState.Heels ? 16 : 10;
+                    cam.speed = sprint ? base * 1.6 : base;
+                }
+            }
+            return scene;
+        };
+
+        //run it!
+        const scene = createScene();
+        
+        //this has to be run unconditionally 
+        engine.runRenderLoop(() => {
+            scene.render();
+        });
+        window.addEventListener("resize", () => engine.resize());
+    </script>
+</body>
+</html>
